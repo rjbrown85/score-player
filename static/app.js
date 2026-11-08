@@ -1,0 +1,84 @@
+const $=id=>document.getElementById(id);
+let playBpm=100,loopStart=0,loopEnd=1,queueAnchor=0,resumeAfterRange=false,playbackLoop=false,playbackStart=0,playbackEnd=1;
+let score=null,pdfURL=null,ctx=null,playing=false,position=0,anchor=0,nextIndex=0,queue=[],voices=[],timer=null,activeJob=null;
+const names=['C','C♯','D','D♯','E','F','F♯','G','G♯','A','A♯','B'];
+const pitchName=p=>names[((p%12)+12)%12]+(Math.floor(p/12)-1);
+const bpm=()=>Math.max(30,Math.min(240,Number($('bpm').value)||100));
+const shift=()=>Math.max(-24,Math.min(24,Number($('transpose').value)||0));
+const selectedNotes=()=>score?score.notes.filter(n=>$('part').value==='all'||n.part===Number($('part').value)):[];
+const total=()=>score?Math.max(1,score.length||0,...score.notes.map(n=>n.start+n.duration)):1;
+const seconds=beat=>beat*60/bpm();
+const rangeClock=s=>{const tenths=Math.round(s*10);return clock(tenths/10)+'.'+(tenths%10);};
+const clock=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+function status(text,error=false,busy=false){$('status').textContent=text;$('status').className='status'+(error?' error':'')+(busy?' busy':'');}
+function save(){if(score)try{localStorage.setItem('score-player-session',JSON.stringify({score,job:activeJob,hasPDF:!!pdfURL,bpm:bpm(),transpose:shift(),sound:$('sound').value,loop:{start:loopStart,end:loopEnd,enabled:$('loop').checked}}));}catch{status('Your browser could not save this session. Download MIDI to keep your edits.',true);}}
+function stop(reset=false){if(playing)position=currentPosition();playing=false;clearInterval(timer);voices.forEach(v=>{try{v.stop();}catch{}});voices=[];if(reset)position=0;$('play').textContent='▶';$('play').setAttribute('aria-label','Play');updateClock();draw();}
+function tone(n,when,duration){const p=n.pitch+shift();if(p<0||p>127)return;const g=ctx.createGain();g.connect(ctx.destination);const v=(n.velocity||90)/127*.11;g.gain.setValueAtTime(0,when);g.gain.linearRampToValueAtTime(v,when+Math.min(.008,duration*.1));g.gain.exponentialRampToValueAtTime(Math.max(.001,v*.25),when+duration*.75);g.gain.linearRampToValueAtTime(0,when+duration);const o=ctx.createOscillator();o.type=$('sound').value==='24'?'triangle':$('sound').value==='80'?'sine':'triangle';o.frequency.value=440*Math.pow(2,(p-69)/12);o.connect(g);o.start(when);o.stop(when+duration+.002);voices.push(o);o.onended=()=>{o.disconnect();g.disconnect();voices=voices.filter(v=>v!==o);};}
+function currentPosition(){const beat=Math.max(0,(ctx.currentTime-anchor)*playBpm/60);return playbackLoop?ScoreLoop.wrap(beat,playbackStart,playbackEnd):Math.min(total(),beat);}
+function tick(){
+  position=currentPosition();const looping=$('loop').checked,end=looping?loopEnd:total(),horizon=ctx.currentTime+.15;
+  for(let guard=0;guard<2000;guard++){
+    if(nextIndex<queue.length){const n=queue[nextIndex];const when=queueAnchor+seconds(n.start);if(when>=horizon)break;nextIndex++;const actual=Math.max(ctx.currentTime,when),duration=seconds(n.duration)-(actual-when);if(duration>.001)tone(n,actual,duration);}
+    else if(looping&&queueAnchor+seconds(end)<=horizon){queueAnchor+=seconds(loopEnd-loopStart);queue=ScoreLoop.clip(selectedNotes(),loopStart,loopEnd);nextIndex=0;}
+    else break;
+  }
+  if(!looping&&position>=total())stop(true);updateClock();draw();
+}
+async function play(){
+  if(!score||!score.notes.length)return;if(playing){stop();return;}
+  try{ctx??=new AudioContext();await ctx.resume();if(playing)return;
+    const looping=$('loop').checked;if(looping&&(position<loopStart||position>=loopEnd))position=loopStart;else if(position>=total())position=0;
+    playbackLoop=looping;playbackStart=loopStart;playbackEnd=loopEnd;queue=ScoreLoop.clip(selectedNotes(),position,looping?loopEnd:total());nextIndex=0;playBpm=bpm();anchor=ctx.currentTime-seconds(position);queueAnchor=anchor;playing=true;
+    $('play').textContent='Ⅱ';$('play').setAttribute('aria-label','Pause');timer=setInterval(tick,25);tick();
+  }catch(e){status('Audio could not start: '+e.message,true);}
+}
+function updateRange(){
+  const bounds=ScoreLoop.bounds(loopStart,loopEnd,total());loopStart=bounds.start;loopEnd=bounds.end;
+  $('loop-range').hidden=!score;$('loop-range').classList.toggle('active',$('loop').checked);
+  $('loop-start').max=$('loop-end').max=total();$('loop-start').value=loopStart;$('loop-end').value=loopEnd;
+  $('loop-start').setAttribute('aria-valuetext',rangeClock(seconds(loopStart)));$('loop-end').setAttribute('aria-valuetext',rangeClock(seconds(loopEnd)));
+  $('loop-from').textContent=rangeClock(seconds(loopStart));$('loop-to').textContent=rangeClock(seconds(loopEnd));
+  $('loop-fill').style.left=(loopStart/total()*100)+'%';$('loop-fill').style.right=(100-loopEnd/total()*100)+'%';
+}
+function updateClock(){updateRange();$('seek').max=total();$('seek').value=position;$('clock').textContent=clock(seconds(position))+' / '+clock(seconds(score?total():0));}
+function draw(){const canvas=$('roll'),r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;canvas.width=r.width*dpr;canvas.height=r.height*dpr;const c=canvas.getContext('2d');c.scale(dpr,dpr);const ns=selectedNotes(),lo=ns.length?Math.min(...ns.map(n=>n.pitch))-2:48,hi=ns.length?Math.max(...ns.map(n=>n.pitch))+2:72;const h=r.height/(hi-lo+1),left=38,w=r.width-left-8,end=total();c.fillStyle='#eff2e9';c.fillRect(0,0,r.width,r.height);for(let p=lo;p<=hi;p++){const y=(hi-p)*h;c.fillStyle=[1,3,6,8,10].includes(p%12)?'#e8eddf':'#f4f6ef';c.fillRect(left,y,w,h);if(p%12===0){c.fillStyle='#87917f';c.font='9px sans-serif';c.fillText(pitchName(p),5,y+h*.8);}}const stride=Math.max(1,Math.ceil(end/24));for(let b=0;b<end;b+=stride){c.strokeStyle='#dfe5d7';c.beginPath();c.moveTo(left+b/end*w,0);c.lineTo(left+b/end*w,r.height);c.stroke();}for(const n of ns){const on=playing&&position>=n.start&&position<n.start+n.duration;c.fillStyle=on?'#dbab57':['#659b76','#8da475','#577f7b','#ad9e68'][n.part%4];c.beginPath();c.roundRect(left+n.start/end*w,(hi-n.pitch)*h+1,Math.max(3,n.duration/end*w),Math.max(2,h-2),2);c.fill();}if(score&&$('loop').checked){const a=left+loopStart/end*w,b=left+loopEnd/end*w;c.fillStyle='#24694d17';c.fillRect(a,0,b-a,r.height);c.fillStyle='#2339311a';c.fillRect(left,0,a-left,r.height);c.fillRect(b,0,left+w-b,r.height);c.strokeStyle='#24694d';c.lineWidth=2;for(const x of [a,b]){c.beginPath();c.moveTo(x,0);c.lineTo(x,r.height);c.stroke();}}if(score){const x=left+position/end*w;c.strokeStyle='#ba8044';c.lineWidth=1.5;c.beginPath();c.moveTo(x,0);c.lineTo(x,r.height);c.stroke();}}
+function renderNotes(){const body=$('notes');body.replaceChildren();$('note-count').textContent=`${score?.notes.length||0} notes`;$('editor-empty').hidden=Boolean(score?.notes.length);if(!score)return;score.notes.forEach((n,index)=>{const row=document.createElement('tr');const pitch=document.createElement('input');pitch.value=pitchName(n.pitch);pitch.setAttribute('aria-label',`Note ${index+1} pitch`);pitch.title='Enter a note such as C4, F#3, or Bb2';pitch.onchange=()=>{const m=pitch.value.trim().match(/^([A-Ga-g])([#♯b♭]?)(-?\d)$/);if(!m){pitch.value=pitchName(n.pitch);return;}const p=({C:0,D:2,E:4,F:5,G:7,A:9,B:11}[m[1].toUpperCase()])+(Number(m[3])+1)*12+(['#','♯'].includes(m[2])?1:['b','♭'].includes(m[2])?-1:0);if(p<0||p>127){pitch.value=pitchName(n.pitch);return;}stop();n.pitch=p;pitch.value=pitchName(p);save();draw();};const start=document.createElement('input');Object.assign(start,{type:'number',min:1,max:100001,step:.125,value:Math.round((n.start+1)*1000)/1000});start.setAttribute('aria-label',`Note ${index+1} start beat`);const duration=document.createElement('input');Object.assign(duration,{type:'number',min:.03125,max:10000,step:.125,value:Math.round(n.duration*1000)/1000});duration.setAttribute('aria-label',`Note ${index+1} length`);for(const [input,key,offset]of[[start,'start',1],[duration,'duration',0]])input.onchange=()=>{const value=Number(input.value)-offset;if(!Number.isFinite(value)||value<0||(key==='duration'&&value===0)||value>100000){input.value=n[key]+offset;return;}stop();n[key]=value;save();draw();updateClock();};const part=document.createElement('span');part.textContent=score.parts[n.part]||'Part';const del=document.createElement('button');del.textContent='×';del.setAttribute('aria-label',`Remove note ${index+1}`);del.onclick=()=>{stop();score.notes.splice(index,1);renderNotes();save();draw();updateClock();$('play').disabled=$('download').disabled=!score.notes.length;};for(const el of[pitch,start,duration,part,del]){const cell=document.createElement('td');cell.append(el);row.append(cell);}body.append(row);});}
+function load(data,pdf=null){stop(true);score=data;loopStart=0;loopEnd=total();$('loop').checked=false;pdfURL=pdf;$('title').textContent=data.title;$('summary').textContent=`${data.method||'Music'} · ${data.parts.length} ${data.parts.length===1?'part':'parts'}`;$('bpm').value=Math.max(30,Math.min(240,data.bpm||100));$('transpose').value=0;$('part').replaceChildren(new Option('All','all'));data.parts.forEach((name,i)=>$('part').add(new Option(name,i)));$('warnings').replaceChildren();for(const w of data.warnings||[]){const p=document.createElement('p');p.textContent=w;$('warnings').append(p);}$('warning-details').hidden=!data.warnings?.length;$('empty').hidden=true;for(const id of['play','stop','download','seek','add'])$(id).disabled=false;$('pdf').src=pdf||'about:blank';$('pdf').hidden=!pdf;$('reread').hidden=!pdf;$('save-pdf').hidden=!pdf;$('no-pdf').hidden=!!pdf;renderNotes();updateClock();draw();save();}
+async function importFile(file){if(!file)return;stop(true);$('file').disabled=true;$('demo').disabled=true;$('reread').disabled=true;status('Opening your score…',false,true);try{const fd=new FormData();fd.append('file',file);fd.append('mode',$('mode').value);fd.append('tuning',$('tuning').value);fd.append('step',$('step').value);fd.append('rhythm',$('rhythm').value);fd.append('meter',$('meter').value);const response=await fetch('/api/import',{method:'POST',body:fd});const data=await response.json();if(!response.ok)throw Error(typeof data.detail==='string'?data.detail:'The file could not be imported.');const jid=data.id;for(;;){await new Promise(r=>setTimeout(r,1500));const res=await fetch('/api/jobs/'+jid);if(!res.ok)throw Error('The import is no longer available. Try again.');const job=await res.json();if(job.status==='error')throw Error(job.message);if(job.status==='done'){activeJob=jid;load(job.result,job.pdf?'/api/jobs/'+jid+'/pdf':null);status(job.result.rhythm==='read'?'':job.result.method?.includes('tab')?'Approximate rhythm':'');break;}status(job.message,false,true);}}catch(e){status(e.message,true);}finally{$('file').disabled=false;$('file').value='';$('demo').disabled=false;$('reread').disabled=false;refreshLibrary();}}
+$('mode').onchange=()=>{$('tab-settings').hidden=$('mode').value!=='tab';};$('file').onchange=e=>importFile(e.target.files[0]);const dz=$('dropzone');dz.ondragover=e=>{e.preventDefault();dz.classList.add('drag');};dz.ondragleave=()=>dz.classList.remove('drag');dz.ondrop=e=>{e.preventDefault();dz.classList.remove('drag');if(!$('file').disabled)importFile(e.dataTransfer.files[0]);};$('play').onclick=play;$('stop').onclick=()=>stop(true);$('seek').oninput=()=>{const p=Number($('seek').value);stop();position=p;updateClock();draw();};for(const id of['bpm','transpose','sound','part'])$(id).onchange=()=>{stop();$('bpm').value=bpm();$('transpose').value=shift();save();updateClock();draw();};
+$('download').onclick=async()=>{try{const response=await fetch('/api/midi',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({notes:selectedNotes(),bpm:bpm(),program:Number($('sound').value),transpose:shift(),length:total()})});if(!response.ok){const e=await response.json();throw Error(typeof e.detail==='string'?e.detail:'Check note values before exporting.');}const url=URL.createObjectURL(await response.blob());const a=document.createElement('a');a.href=url;a.download=(score.title||'score')+'.mid';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);status('Downloaded');}catch(e){status(e.message,true);}};
+$('add').onclick=()=>{stop();score.notes.push({pitch:60,start:score.notes.length?total():0,duration:1,velocity:90,part:0});renderNotes();save();draw();$('play').disabled=$('download').disabled=false;};
+for(const tab of['review','pdf'])$(tab+'-tab').onclick=()=>{$('review').hidden=tab!=='review';$('pdf-view').hidden=tab!=='pdf';$('review-tab').setAttribute('aria-selected',tab==='review');$('pdf-tab').setAttribute('aria-selected',tab==='pdf');};
+$('demo').onclick=()=>{activeJob=null;load({title:'Demo',method:'Built-in practice melody',bpm:100,parts:['Melody'],warnings:[],notes:[60,64,67,72,71,67,64,62,60].map((pitch,i)=>({pitch,start:i*.5,duration:i===8?1.5:.45,velocity:90,part:0}))});status('');};
+new ResizeObserver(draw).observe($('roll').parentElement);
+try{const saved=JSON.parse(localStorage.getItem('score-player-session')||'null');if(saved?.score){activeJob=saved.job;load(saved.score,activeJob&&saved.hasPDF?'/api/jobs/'+activeJob+'/pdf':null);$('bpm').value=saved.bpm;$('transpose').value=saved.transpose;$('sound').value=saved.sound;if(saved.loop){loopStart=saved.loop.start;loopEnd=saved.loop.end;$('loop').checked=!!saved.loop.enabled;}updateClock();draw();save();status('');}}catch{}
+fetch('/api/status').then(r=>r.json()).then(s=>{if(!s.ready)status('Sheet-music recognition is not installed. Guitar tab and MusicXML imports are available.',true);}).catch(()=>status('The local app is unavailable. Open Start Score Player.command to restart it.',true));
+
+$('rhythm').onchange=()=>{$('spacing-control').hidden=$('rhythm').value!=='even';$('meter-control').hidden=$('rhythm').value==='even';};
+
+$('reread').onclick=async()=>{if(!pdfURL)return;try{const response=await fetch(pdfURL);if(!response.ok)throw Error('Original PDF unavailable. Upload it again.');$('rhythm').value='read';await importFile(new File([await response.blob()],(score.title||'Score')+'.pdf',{type:'application/pdf'}));}catch(e){status(e.message,true);}};
+
+for(const id of ['loop-start','loop-end']){
+  $(id).oninput=()=>{const value=Number($(id).value);resumeAfterRange=resumeAfterRange||playing;stop();const gap=Math.min(.25,total());if(id==='loop-start')loopStart=Math.min(value,loopEnd-gap);else loopEnd=Math.max(value,loopStart+gap);$('loop').checked=true;updateRange();if(position<loopStart||position>=loopEnd)position=loopStart;updateClock();draw();save();};
+  $(id).onchange=()=>{if(resumeAfterRange){resumeAfterRange=false;play();}};
+}
+$('loop').onchange=()=>{const resume=playing;stop();updateRange();draw();save();if(resume)play();};
+
+async function refreshLibrary(){
+  try{const response=await fetch('/api/library');if(!response.ok)throw Error('Library unavailable.');const entries=await response.json();$('library-list').replaceChildren();
+    if(!entries.length){const p=document.createElement('p');p.className='hint';p.textContent='Empty';$('library-list').append(p);}
+    for(const entry of entries){const row=document.createElement('div');row.className='library-item';const button=document.createElement('button');button.textContent=entry.title;button.title=entry.title;button.onclick=()=>openLibrary(entry.id);const pdf=document.createElement('a');pdf.href='/api/jobs/'+entry.id+'/pdf';pdf.download=entry.title+'.pdf';pdf.textContent='↓';pdf.title='Download PDF';pdf.setAttribute('aria-label','Download '+entry.title+' PDF');row.append(button,pdf);$('library-list').append(row);}
+  }catch(e){status(e.message,true);}
+}
+async function openLibrary(id){
+  try{const response=await fetch('/api/library/'+id);if(!response.ok)throw Error('Saved PDF unavailable.');const entry=await response.json();
+    if(entry.session){const s=entry.session;activeJob=id;load(s.score,'/api/jobs/'+id+'/pdf');$('bpm').value=s.bpm;$('transpose').value=s.transpose;$('sound').value=s.sound;loopStart=s.loop.start;loopEnd=s.loop.end;$('loop').checked=s.loop.enabled;updateClock();draw();save();status('');}
+    else {const pdf=await fetch('/api/jobs/'+id+'/pdf');if(!pdf.ok)throw Error('Original PDF unavailable.');await importFile(new File([await pdf.blob()],entry.title+'.pdf',{type:'application/pdf'}));}
+  }catch(e){status(e.message,true);}
+}
+$('save-pdf').onclick=async()=>{
+  if(!score||!activeJob||!pdfURL)return;
+  $('save-pdf').disabled=true;
+  try{const response=await fetch('/api/library/'+activeJob,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({score,bpm:bpm(),transpose:shift(),sound:$('sound').value,loop:{start:loopStart,end:loopEnd,enabled:$('loop').checked}})});if(!response.ok)throw Error('Could not save this score.');status('Saved');$('library').open=true;await refreshLibrary();}catch(e){status(e.message,true);}finally{$('save-pdf').disabled=false;}
+};
+refreshLibrary();

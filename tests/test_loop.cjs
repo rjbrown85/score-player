@@ -1,0 +1,11 @@
+const assert=require('node:assert/strict');
+const loop=require('../static/loop.js');
+assert.deepEqual(loop.bounds(9,3,10),{start:2.75,end:3});
+assert.deepEqual(loop.bounds(-1,20,10),{start:0,end:10});
+const notes=[{pitch:60,start:1,duration:4},{pitch:62,start:3,duration:4},{pitch:64,start:5,duration:1}];
+assert.deepEqual(loop.clip(notes,2,5),[{pitch:60,start:2,duration:3},{pitch:62,start:3,duration:2}]);
+assert.deepEqual(loop.clip(notes,8,9),[]);
+assert.equal(loop.wrap(5,2,5),2);
+assert.equal(loop.wrap(11.5,2,5),2.5);
+assert.equal(loop.wrap(4,2,5),4);
+console.log('Loop bounds, clipped sustain, exclusive end, silent sections, and repeated wraps passed.');

@@ -1,0 +1,14 @@
+.venv/
+data/
+engines/Audiveris.app/
+engines/tab-ocr
+__pycache__/
+.pytest_cache/
+.playwright-cli/
+output/
+
+engines/fret-ocr
+
+.DS_Store
+samples/
+*.log
